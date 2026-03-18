@@ -3,7 +3,7 @@
 # - Success: sends status=up with run duration
 # - Failure: sends status=down with exit code
 
-echo "[$(date)] Running ETF Trend Algo..."
+echo "[$(date)] Running Credit Liquidity Monitor..."
 
 set -euo pipefail
 set -x
@@ -19,8 +19,7 @@ set +a
 # ----------------------------
 # Sanity checks (don’t print secrets)
 # ----------------------------
-: "${ALPACA_KEY_ID:?ALPACA_KEY_ID not set}"
-: "${ALPACA_SECRET_KEY:?ALPACA_SECRET_KEY not set}"
+: "${FRED_API_KEY:?FRED_API_KEY not set}"
 
 # Kuma config (same as yours)
 # --- Kuma config / URL building ---
