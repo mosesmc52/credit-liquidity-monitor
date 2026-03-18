@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from dotenv import find_dotenv, load_dotenv
 from fredapi import Fred
-from helpers import str2bool
+from helpers import getenv_float, getenv_int, str2bool
 from nyfed_client import FetchSpec, NYFedClient
 from SES import AmazonSES
 
@@ -35,20 +35,20 @@ SES_SECRET_KEY = os.environ["AWS_SES_SECRET_ACCESS_KEY"]
 SES_FROM_ADDRESS = os.environ["FROM_ADDRESS"]
 ALERT_TO = [x.strip() for x in os.environ["TO_ADDRESSES"].split(",") if x.strip()]
 
-LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "365"))
-ROLLING_WINDOW = int(os.getenv("ROLLING_WINDOW", "60"))
+LOOKBACK_DAYS = getenv_int(os.getenv("LOOKBACK_DAYS"), 365)
+ROLLING_WINDOW = getenv_int(os.getenv("ROLLING_WINDOW"), 60)
 
 # Credit thresholds
-HY_OAS_ABS_THRESHOLD = float(os.getenv("HY_OAS_ABS_THRESHOLD", "6.0"))  # percent
-BBB_OAS_ABS_THRESHOLD = float(os.getenv("BBB_OAS_ABS_THRESHOLD", "2.5"))  # percent
-OAS_Z_THRESHOLD = float(os.getenv("OAS_Z_THRESHOLD", "2.0"))
+HY_OAS_ABS_THRESHOLD = getenv_float(os.getenv("HY_OAS_ABS_THRESHOLD"), 6.0)  # percent
+BBB_OAS_ABS_THRESHOLD = getenv_float(os.getenv("BBB_OAS_ABS_THRESHOLD"), 2.5)  # percent
+OAS_Z_THRESHOLD = getenv_float(os.getenv("OAS_Z_THRESHOLD"), 2.0)
 
 # Liquidity thresholds
-SOFR_EFFR_SPREAD_BPS_THRESHOLD = float(
-    os.getenv("SOFR_EFFR_SPREAD_BPS_THRESHOLD", "10.0")
+SOFR_EFFR_SPREAD_BPS_THRESHOLD = getenv_float(
+    os.getenv("SOFR_EFFR_SPREAD_BPS_THRESHOLD", 10.0)
 )
-RRP_Z_THRESHOLD = float(os.getenv("RRP_Z_THRESHOLD", "2.0"))
-REPO_Z_THRESHOLD = float(os.getenv("REPO_Z_THRESHOLD", "2.0"))
+RRP_Z_THRESHOLD = getenv_float(os.getenv("RRP_Z_THRESHOLD"), 2.0)
+REPO_Z_THRESHOLD = getenv_float(os.getenv("REPO_Z_THRESHOLD"), 2.0)
 
 SEND_ONLY_ON_ALERT = str2bool(os.getenv("SEND_ONLY_ON_ALERT", True))
 INCLUDE_REPO_TOTAL = str2bool(os.getenv("INCLUDE_REPO_TOTAL", False))
