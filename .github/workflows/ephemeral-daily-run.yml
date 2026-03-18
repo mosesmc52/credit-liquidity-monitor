@@ -50,7 +50,7 @@ jobs:
           DO_SSH_KEY_FINGERPRINT: ${{ secrets.DO_SSH_KEY_FINGERPRINT }}
 
           # Only required if your GHCR image is private
-          GHCR_TOKEN: ${{ secret.GHCR_TOKEN }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
 
           # Your job secrets/vars (example set; adjust to your app)
           AWS_SES_ACCESS_KEY_ID: ${{ secrets.AWS_SES_ACCESS_KEY_ID }}
