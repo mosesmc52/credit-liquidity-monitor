@@ -29,9 +29,9 @@ FRED_API_KEY = os.environ["FRED_API_KEY"]
 
 NYFED_BASE_URL = os.getenv("NYFED_BASE_URL", "https://markets.newyorkfed.org/api")
 
-SES_REGION = os.environ["SES_REGION"]
-SES_ACCESS_KEY = os.environ["SES_ACCESS_KEY"]
-SES_SECRET_KEY = os.environ["SES_SECRET_KEY"]
+SES_REGION = os.environ["AWS_SES_REGION_NAME"]
+SES_ACCESS_KEY = os.environ["AWS_SES_ACCESS_KEY_ID"]
+SES_SECRET_KEY = os.environ["AWS_SES_SECRET_ACCESS_KEY"]
 SES_FROM_ADDRESS = os.environ["FROM_ADDRESS"]
 ALERT_TO = [x.strip() for x in os.environ["TO_ADDRESSES"].split(",") if x.strip()]
 
