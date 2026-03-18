@@ -2,12 +2,12 @@ name: Ephemeral Daily Run (DigitalOcean)
 
 on:
   schedule:
-    - cron: "0 23 * * 1-5"
+    - cron: "0 23 * * *"
   workflow_dispatch: {}
 
 jobs:
   run_ephemeral:
-    environment: Staging
+    environment: Production
     runs-on: ubuntu-latest
 
     permissions:
