@@ -130,16 +130,7 @@ class NYFedClient:
             "REVERSE_REPO_TOTAL",
         }
 
-        repo_rows = (
-            data.get("repo", {}).get("operations", [])
-            if isinstance(data.get("repo"), dict)
-            else []
-        )
-        rrp_rows = (
-            data.get("reverseRepo", {}).get("operations", [])
-            if isinstance(data.get("reverseRepo"), dict)
-            else []
-        )
+        repo_rows, rrp_rows = self._extract_repo_reverse_repo_operations(data)
 
         totals_by_date: Dict[dt.date, float] = {}
         if include_repo:
@@ -281,6 +272,52 @@ class NYFedClient:
             if v is None:
                 continue
             totals_by_date[d] = totals_by_date.get(d, 0.0) + v
+
+    def _extract_repo_reverse_repo_operations(
+        self, payload: Dict[str, Any]
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        repo_section = payload.get("repo")
+        reverse_repo_section = payload.get("reverseRepo")
+
+        repo_rows = (
+            repo_section.get("operations", [])
+            if isinstance(repo_section, dict)
+            else []
+        )
+        rrp_rows = (
+            reverse_repo_section.get("operations", [])
+            if isinstance(reverse_repo_section, dict)
+            else []
+        )
+
+        if rrp_rows:
+            return (
+                self._filter_ops_by_type(repo_rows, include_reverse_repo=False),
+                self._filter_ops_by_type(rrp_rows, include_reverse_repo=True),
+            )
+
+        # Some NY Fed endpoints now return both Repo and Reverse Repo operations
+        # together under repo.operations. Split them by operationType so RRP series
+        # does not come back empty and repo totals are not contaminated.
+        combined_rows = repo_rows
+        return (
+            self._filter_ops_by_type(combined_rows, include_reverse_repo=False),
+            self._filter_ops_by_type(combined_rows, include_reverse_repo=True),
+        )
+
+    @staticmethod
+    def _filter_ops_by_type(
+        rows: Iterable[Dict[str, Any]], include_reverse_repo: bool
+    ) -> List[Dict[str, Any]]:
+        filtered: List[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            op_type = str(row.get("operationType", "")).strip().upper()
+            is_reverse_repo = "REVERSE" in op_type
+            if include_reverse_repo == is_reverse_repo:
+                filtered.append(row)
+        return filtered
 
     def _extract_rows(self, payload: Any) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
