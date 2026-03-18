@@ -45,7 +45,7 @@ OAS_Z_THRESHOLD = getenv_float(os.getenv("OAS_Z_THRESHOLD"), 2.0)
 
 # Liquidity thresholds
 SOFR_EFFR_SPREAD_BPS_THRESHOLD = getenv_float(
-    os.getenv("SOFR_EFFR_SPREAD_BPS_THRESHOLD", 10.0)
+    os.getenv("SOFR_EFFR_SPREAD_BPS_THRESHOLD"), 10.0
 )
 RRP_Z_THRESHOLD = getenv_float(os.getenv("RRP_Z_THRESHOLD"), 2.0)
 REPO_Z_THRESHOLD = getenv_float(os.getenv("REPO_Z_THRESHOLD"), 2.0)
