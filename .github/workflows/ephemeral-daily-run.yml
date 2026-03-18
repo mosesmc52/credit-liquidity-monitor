@@ -51,7 +51,7 @@ jobs:
 
           # Only required if your GHCR image is private
           GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+
 
           # Your job secrets/vars (example set; adjust to your app)
           TO_ADDRESSES: ${{ secrets.TO_ADDRESSES }}
@@ -60,6 +60,7 @@ jobs:
           AWS_SES_SECRET_ACCESS_KEY: ${{ secrets.AWS_SES_SECRET_ACCESS_KEY }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
 
+          GHCR_TOKEN: ${{ vars.GHCR_TOKEN }}
           AWS_SES_REGION_NAME: ${{ vars.AWS_SES_REGION_NAME }}
           NYFED_BASE_URL: ${{ vars.NYFED_BASE_URL }}
           LOOKBACK_DAYS: ${{ vars.LOOKBACK_DAYS }}
