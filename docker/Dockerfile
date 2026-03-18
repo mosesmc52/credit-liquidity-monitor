@@ -19,11 +19,9 @@ RUN poetry config virtualenvs.create false
 RUN poetry install --no-interaction --no-root
 
 # app + cron + supervisor
-COPY algo.py .
+COPY monitor.py .
 COPY helpers.py .
-COPY log.py .
 COPY SES.py .
-COPY alpaca_adapter.py .
 COPY scheduler/run.sh /app/run.sh
 COPY scheduler/crontab /etc/cron.d/weekly-job
 COPY supervisor/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
