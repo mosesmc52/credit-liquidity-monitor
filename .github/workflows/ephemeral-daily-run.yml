@@ -61,7 +61,6 @@ jobs:
           FROM_ADDRESS: ${{ vars.FROM_ADDRESS }}
           GHCR_USERNAME: ${{ vars.GHCR_USERNAME }}
           AWS_SES_REGION_NAME: ${{ vars.AWS_SES_REGION_NAME }}
-          NYFED_BASE_URL: ${{ vars.NYFED_BASE_URL }}
           LOOKBACK_DAYS: ${{ vars.LOOKBACK_DAYS }}
           ROLLING_WINDOW: ${{ vars.ROLLING_WINDOW }}
           HY_OAS_ABS_THRESHOLD: ${{ vars.HY_OAS_ABS_THRESHOLD }}
@@ -109,7 +108,6 @@ jobs:
                 AWS_SES_ACCESS_KEY_ID=${AWS_SES_ACCESS_KEY_ID}
                 AWS_SES_SECRET_ACCESS_KEY=${AWS_SES_SECRET_ACCESS_KEY}
                 FRED_API_KEY=${FRED_API_KEY}
-                NYFED_BASE_URL=${NYFED_BASE_URL}
                 LOOKBACK_DAYS=${LOOKBACK_DAYS}
                 ROLLING_WINDOW=${ROLLING_WINDOW}
                 HY_OAS_ABS_THRESHOLD=${HY_OAS_ABS_THRESHOLD}
