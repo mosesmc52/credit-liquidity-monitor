@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from dotenv import find_dotenv, load_dotenv
 from fredapi import Fred
-from helpers import getenv_float, getenv_int, str2bool
+from helpers import build_latent_stress_signal, getenv_float, getenv_int, str2bool
 from nyfed_client import FetchSpec, NYFedClient
 from SES import AmazonSES
 
@@ -102,6 +102,14 @@ def fetch_nyfed_series(
     return s
 
 
+def score_system_stress(signals: Dict[str, pd.Series]) -> pd.DataFrame:
+    """
+    Current implementation: fast factor score.
+    Future implementation: PyMC posterior-based latent score.
+    """
+    return build_latent_stress_signal(signals)
+
+
 # =========================
 # Analytics
 # =========================
@@ -147,20 +155,18 @@ def analyze_credit_liquidity(
 ) -> tuple[List[AlertEvent], Dict[str, pd.Series]]:
     signals: Dict[str, pd.Series] = {}
 
-    # Credit
+    # -------- Credit signals --------
     signals["hy_oas"] = hy_oas
     signals["bbb_oas"] = bbb_oas
     signals["hy_oas_z"] = rolling_zscore(hy_oas, rolling_window)
     signals["bbb_oas_z"] = rolling_zscore(bbb_oas, rolling_window)
 
-    # Credit dispersion (VERY important signal)
+    # HY minus BBB dispersion
     signals["hy_minus_bbb"] = signals["hy_oas"] - signals["bbb_oas"]
     signals["hy_minus_bbb_z"] = rolling_zscore(signals["hy_minus_bbb"], rolling_window)
 
-    # Liquidity
-    rates = pd.concat(
-        [sofr.rename("SOFR"), effr.rename("EFFR")], axis=1, sort=False
-    ).sort_index()
+    # -------- Liquidity signals --------
+    rates = pd.concat([sofr.rename("SOFR"), effr.rename("EFFR")], axis=1).sort_index()
     rates = rates.ffill()
     signals["sofr"] = rates["SOFR"]
     signals["effr"] = rates["EFFR"]
@@ -173,11 +179,23 @@ def analyze_credit_liquidity(
         signals["repo_total"] = repo_total
         signals["repo_total_z"] = rolling_zscore(repo_total, rolling_window)
 
+    # -------- Composite stress score --------
+    signals["stress_score"] = (
+        signals["hy_oas_z"].fillna(0)
+        + signals["bbb_oas_z"].fillna(0)
+        + signals["hy_minus_bbb_z"].fillna(0)
+        + (signals["sofr_effr_spread_bps"] / 10.0).fillna(0)
+    )
+
+    # Convert to probability (logistic transform)
+    signals["stress_prob"] = 1 / (1 + np.exp(-signals["stress_score"]))
+
     alerts: List[AlertEvent] = []
 
     # -------- Credit alerts --------
     hy_latest = latest_valid(signals["hy_oas"])
     hy_z_latest = latest_valid(signals["hy_oas_z"])
+
     if hy_latest is not None and hy_latest >= HY_OAS_ABS_THRESHOLD:
         alerts.append(
             AlertEvent(
@@ -189,6 +207,7 @@ def analyze_credit_liquidity(
                 message=f"HY OAS is {hy_latest:.2f}% (threshold {HY_OAS_ABS_THRESHOLD:.2f}%).",
             )
         )
+
     if hy_z_latest is not None and hy_z_latest >= OAS_Z_THRESHOLD:
         alerts.append(
             AlertEvent(
@@ -201,6 +220,7 @@ def analyze_credit_liquidity(
 
     bbb_latest = latest_valid(signals["bbb_oas"])
     bbb_z_latest = latest_valid(signals["bbb_oas_z"])
+
     if bbb_latest is not None and bbb_latest >= BBB_OAS_ABS_THRESHOLD:
         alerts.append(
             AlertEvent(
@@ -210,6 +230,7 @@ def analyze_credit_liquidity(
                 message=f"BBB OAS is {bbb_latest:.2f}% (threshold {BBB_OAS_ABS_THRESHOLD:.2f}%).",
             )
         )
+
     if bbb_z_latest is not None and bbb_z_latest >= OAS_Z_THRESHOLD:
         alerts.append(
             AlertEvent(
@@ -217,6 +238,18 @@ def analyze_credit_liquidity(
                 name="BBB OAS z-score",
                 severity="medium",
                 message=f"BBB OAS z-score is {bbb_z_latest:.2f} (threshold {OAS_Z_THRESHOLD:.2f}).",
+            )
+        )
+
+    # -------- HY vs BBB dispersion alert --------
+    disp_z_latest = latest_valid(signals["hy_minus_bbb_z"])
+    if disp_z_latest is not None and disp_z_latest >= OAS_Z_THRESHOLD:
+        alerts.append(
+            AlertEvent(
+                category="credit",
+                name="HY vs BBB dispersion",
+                severity="medium",
+                message=f"HY-BBB spread z-score is {disp_z_latest:.2f} (threshold {OAS_Z_THRESHOLD:.2f}).",
             )
         )
 
@@ -257,6 +290,30 @@ def analyze_credit_liquidity(
                     message=f"Repo total z-score is {repo_z_latest:.2f} (threshold {REPO_Z_THRESHOLD:.2f}).",
                 )
             )
+
+    # -------- Stress regime classification --------
+    stress_prob_latest = latest_valid(signals.get("stress_prob")) or 0.0
+
+    if stress_prob_latest >= 0.85:
+        regime = "CRISIS"
+    elif stress_prob_latest >= 0.70:
+        regime = "STRESS"
+    elif stress_prob_latest >= 0.55:
+        regime = "WATCH"
+    else:
+        regime = "NORMAL"
+
+    signals["stress_regime"] = regime  # optional but useful
+
+    if regime != "NORMAL":
+        alerts.append(
+            AlertEvent(
+                category="system",
+                name="Market Stress Regime",
+                severity="high" if regime == "CRISIS" else "medium",
+                message=f"System stress regime = {regime} (prob={stress_prob_latest:.2f})",
+            )
+        )
 
     return alerts, signals
 
@@ -336,6 +393,25 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
             )
         )
 
+    paths.append(
+        make_line_chart(
+            signals["latent_stress"],
+            "Latent System Stress Score",
+            "Score",
+            out_dir / "latent_stress.png",
+        )
+    )
+
+    paths.append(
+        make_line_chart(
+            signals["stress_prob"] * 100.0,
+            "System Stress Probability",
+            "Percent",
+            out_dir / "stress_probability.png",
+            hline=70.0,
+        )
+    )
+
     return paths
 
 
@@ -381,6 +457,8 @@ def render_alert_html(
 
         <p><b>Snapshot</b></p>
         <ul>
+          <li>Latent stress score: {last_text("latent_stress", "{:.2f}")}</li>
+          <li>Stress probability: {last_text("stress_prob", "{:.1%}")}</li>
           <li>HY OAS: {last_text("hy_oas", "{:.2f}%")}</li>
           <li>BBB OAS: {last_text("bbb_oas", "{:.2f}%")}</li>
           <li>SOFR-EFFR spread: {last_text("sofr_effr_spread_bps", "{:.1f} bps")}</li>
@@ -435,6 +513,34 @@ def main() -> None:
         repo_total=repo_total,
         rolling_window=ROLLING_WINDOW,
     )
+
+    latent_df = score_system_stress(signals)
+
+    signals["latent_stress"] = latent_df["latent_stress"]
+    signals["stress_prob"] = latent_df["stress_prob"]
+
+    stress_prob_latest = latest_valid(signals["stress_prob"])
+    latent_latest = latest_valid(signals["latent_stress"])
+
+    if stress_prob_latest is not None:
+        if stress_prob_latest >= 0.85:
+            alerts.append(
+                AlertEvent(
+                    category="system",
+                    name="Latent stress regime",
+                    severity="high",
+                    message=f"Stress probability is {stress_prob_latest:.1%}; latent score={latent_latest:.2f}.",
+                )
+            )
+        elif stress_prob_latest >= 0.70:
+            alerts.append(
+                AlertEvent(
+                    category="system",
+                    name="Latent stress regime",
+                    severity="medium",
+                    message=f"Stress probability is {stress_prob_latest:.1%}; latent score={latent_latest:.2f}.",
+                )
+            )
 
     if SEND_ONLY_ON_ALERT and not alerts:
         print("No alert triggered. Exiting without email.")
