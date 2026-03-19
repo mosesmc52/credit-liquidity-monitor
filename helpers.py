@@ -1,4 +1,9 @@
+import datetime as dt
 import os
+from typing import Dict, List, Optional
+
+import numpy as np
+import pandas as pd
 
 
 def str2bool(value):
@@ -46,3 +51,54 @@ def getenv_float(name: str, default: float) -> float:
         return float(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def last_n_above(s: pd.Series, threshold: float, n: int) -> bool:
+    s = s.dropna()
+    if len(s) < n:
+        return False
+    return bool((s.iloc[-n:] >= threshold).all())
+
+
+def zero_series_like(index: pd.Index) -> pd.Series:
+    return pd.Series(0.0, index=index, dtype=float)
+
+
+def logistic_transform(s: pd.Series) -> pd.Series:
+    return 1.0 / (1.0 + np.exp(-s))
+
+
+def classify_stress_regime(stress_prob: float) -> str:
+    if stress_prob >= 0.85:
+        return "CRISIS"
+    if stress_prob >= 0.75:
+        return "STRESS"
+    if stress_prob >= 0.60:
+        return "WATCH"
+    return "NORMAL"
+
+
+# =========================
+# Analytics
+# =========================
+
+
+def rolling_zscore(s: pd.Series, window: int) -> pd.Series:
+    mu = s.rolling(window).mean()
+    sigma = s.rolling(window).std(ddof=0)
+    z = (s - mu) / sigma.replace(0.0, pd.NA)
+    return z
+
+
+def latest_valid(s: pd.Series) -> Optional[float]:
+    s = s.dropna()
+    if s.empty:
+        return None
+    return float(s.iloc[-1])
+
+
+def latest_date(s: pd.Series) -> Optional[pd.Timestamp]:
+    s = s.dropna()
+    if s.empty:
+        return None
+    return s.index[-1]
