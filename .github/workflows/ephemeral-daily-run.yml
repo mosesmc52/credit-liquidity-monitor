@@ -71,7 +71,7 @@ jobs:
           REPO_Z_THRESHOLD: ${{ vars.REPO_Z_THRESHOLD }}
           SEND_ONLY_ON_ALERT: ${{ vars.SEND_ONLY_ON_ALERT }}
           INCLUDE_REPO_TOTAL: ${{ vars.INCLUDE_REPO_TOTAL }}
-
+          CHART_LOOKBACK_DAYS: ${{ vars.CHART_LOOKBACK_DAYS }}
 
         run: |
           set -euo pipefail
@@ -118,6 +118,7 @@ jobs:
                 REPO_Z_THRESHOLD=${REPO_Z_THRESHOLD}
                 SEND_ONLY_ON_ALERT=${SEND_ONLY_ON_ALERT}
                 INCLUDE_REPO_TOTAL=${INCLUDE_REPO_TOTAL}
+                CHART_LOOKBACK_DAYS=${CHART_LOOKBACK_DAYS}
 
             - path: /opt/job/run.sh
               permissions: "0700"

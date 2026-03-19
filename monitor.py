@@ -16,6 +16,7 @@ from helpers import (
     getenv_float,
     getenv_int,
     last_n_above,
+    last_n_days,
     latest_date,
     latest_valid,
     logistic_transform,
@@ -89,6 +90,8 @@ REPO_Z_THRESHOLD = getenv_float(os.getenv("REPO_Z_THRESHOLD"), 2.25)
 
 SEND_ONLY_ON_ALERT = str2bool(os.getenv("SEND_ONLY_ON_ALERT", True))
 INCLUDE_REPO_TOTAL = str2bool(os.getenv("INCLUDE_REPO_TOTAL", False))
+
+CHART_LOOKBACK_DAYS = getenv_int(os.getenv("CHART_LOOKBACK_DAYS"), 90)
 
 
 # =========================
@@ -414,7 +417,7 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
 
     paths.append(
         make_line_chart(
-            signals["hy_oas"],
+            last_n_days(signals["hy_oas"], CHART_LOOKBACK_DAYS),
             "Credit Stress: High Yield OAS",
             "Percent",
             out_dir / "hy_oas.png",
@@ -423,7 +426,7 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
     )
     paths.append(
         make_line_chart(
-            signals["bbb_oas"],
+            last_n_days(signals["bbb_oas"], CHART_LOOKBACK_DAYS),
             "Credit Stress: BBB OAS",
             "Percent",
             out_dir / "bbb_oas.png",
@@ -432,7 +435,7 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
     )
     paths.append(
         make_line_chart(
-            signals["sofr_effr_spread_bps"],
+            last_n_days(signals["sofr_effr_spread_bps"], CHART_LOOKBACK_DAYS),
             "Liquidity Stress: SOFR - EFFR Spread",
             "Basis Points",
             out_dir / "sofr_effr_spread.png",
@@ -441,7 +444,7 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
     )
     paths.append(
         make_line_chart(
-            signals["rrp_total"],
+            last_n_days(signals["rrp_total"], CHART_LOOKBACK_DAYS),
             "Liquidity Stress: RRP Total",
             "Amount",
             out_dir / "rrp_total.png",
@@ -450,7 +453,7 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
 
     paths.append(
         make_line_chart(
-            signals["hy_minus_bbb"],
+            last_n_days(signals["hy_minus_bbb"], CHART_LOOKBACK_DAYS),
             "Credit Stress: HY - BBB Spread (Dispersion)",
             "Percent",
             out_dir / "hy_minus_bbb.png",
@@ -459,7 +462,7 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
     if "repo_total" in signals:
         paths.append(
             make_line_chart(
-                signals["repo_total"],
+                last_n_days(signals["repo_total"], CHART_LOOKBACK_DAYS),
                 "Liquidity Stress: Repo Total",
                 "Amount",
                 out_dir / "repo_total.png",
@@ -469,7 +472,7 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
     if "stress_score" in signals:
         paths.append(
             make_line_chart(
-                signals["stress_score"],
+                last_n_days(signals["stress_score"], CHART_LOOKBACK_DAYS),
                 "System Stress: Composite Stress Score",
                 "Score",
                 out_dir / "stress_score.png",
@@ -479,7 +482,7 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
     if "stress_prob" in signals:
         paths.append(
             make_line_chart(
-                signals["stress_prob"] * 100.0,
+                last_n_days(signals["stress_prob"] * 100.0, CHART_LOOKBACK_DAYS),
                 "System Stress: Stress Probability",
                 "Percent",
                 out_dir / "stress_probability.png",

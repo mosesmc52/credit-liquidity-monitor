@@ -78,6 +78,15 @@ def classify_stress_regime(stress_prob: float) -> str:
     return "NORMAL"
 
 
+def last_n_days(s: pd.Series, days: int = 90) -> pd.Series:
+    s = s.dropna()
+    if s.empty:
+        return s
+
+    cutoff = s.index.max() - pd.Timedelta(days=days)
+    return s[s.index >= cutoff]
+
+
 # =========================
 # Analytics
 # =========================
