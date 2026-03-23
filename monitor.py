@@ -44,6 +44,20 @@ class AlertEvent:
     message: str
 
 
+@dataclass(frozen=True)
+class ThresholdLine:
+    label: str
+    value: float
+    color: str
+
+
+@dataclass(frozen=True)
+class ThresholdSeries:
+    label: str
+    series: pd.Series
+    color: str
+
+
 # =========================
 # Configuration
 # =========================
@@ -92,6 +106,20 @@ SEND_ONLY_ON_ALERT = str2bool(os.getenv("SEND_ONLY_ON_ALERT", True))
 INCLUDE_REPO_TOTAL = str2bool(os.getenv("INCLUDE_REPO_TOTAL", False))
 
 CHART_LOOKBACK_DAYS = getenv_int(os.getenv("CHART_LOOKBACK_DAYS"), 90)
+
+HY_OAS_CRISIS_THRESHOLD = HY_OAS_ABS_THRESHOLD + 1.5
+BBB_OAS_CRISIS_THRESHOLD = BBB_OAS_ABS_THRESHOLD + 0.75
+OAS_Z_CRISIS_THRESHOLD = OAS_Z_THRESHOLD + 1.0
+SOFR_EFFR_SPREAD_BPS_CRISIS_THRESHOLD = max(
+    SOFR_EFFR_SPREAD_BPS_THRESHOLD + 10.0, 20.0
+)
+RRP_Z_CRISIS_THRESHOLD = RRP_Z_THRESHOLD + 0.5
+REPO_Z_CRISIS_THRESHOLD = REPO_Z_THRESHOLD + 0.5
+STRESS_SCORE_STRESS_THRESHOLD = 1.10
+STRESS_SCORE_CRISIS_THRESHOLD = 1.73
+
+STRESS_LINE_COLOR = "#d97706"
+CRISIS_LINE_COLOR = "#b91c1c"
 
 
 # =========================
@@ -396,20 +424,61 @@ def make_line_chart(
     title: str,
     ylabel: str,
     out_path: Path,
-    hline: Optional[float] = None,
+    threshold_lines: Optional[List[ThresholdLine]] = None,
+    threshold_series: Optional[List[ThresholdSeries]] = None,
 ) -> Path:
     s = s.dropna()
     fig, ax = plt.subplots(figsize=(11, 5.5))
-    ax.plot(s.index, s.values)
-    if hline is not None:
-        ax.axhline(hline, linestyle="--")
+    ax.plot(s.index, s.values, color="#1f77b4", linewidth=2.0, label="Signal")
+    if threshold_lines:
+        for line in threshold_lines:
+            ax.axhline(
+                line.value,
+                linestyle="--",
+                linewidth=1.8,
+                color=line.color,
+                label=f"{line.label} ({line.value:.2f})",
+            )
+    if threshold_series:
+        for overlay in threshold_series:
+            overlay_series = overlay.series.reindex(s.index).dropna()
+            if overlay_series.empty:
+                continue
+            ax.plot(
+                overlay_series.index,
+                overlay_series.values,
+                linestyle="--",
+                linewidth=1.8,
+                color=overlay.color,
+                label=overlay.label,
+            )
     ax.set_title(title)
     ax.set_ylabel(ylabel)
     ax.grid(True, alpha=0.3)
+    if threshold_lines or threshold_series:
+        ax.legend(loc="best")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return out_path
+
+
+def build_dynamic_threshold_series(
+    s: pd.Series,
+    z_threshold: float,
+    label: str,
+    color: str,
+) -> ThresholdSeries:
+    clean = s.dropna()
+    if clean.empty:
+        return ThresholdSeries(label=label, series=clean, color=color)
+
+    effective_window = min(ROLLING_WINDOW, len(clean))
+    min_periods = min(effective_window, 5)
+    rolling_mean = clean.rolling(effective_window, min_periods=min_periods).mean()
+    rolling_std = clean.rolling(effective_window, min_periods=min_periods).std(ddof=0)
+    threshold = rolling_mean + (rolling_std * z_threshold)
+    return ThresholdSeries(label=label, series=threshold, color=color)
 
 
 def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
@@ -421,7 +490,10 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
             "Credit Stress: High Yield OAS",
             "Percent",
             out_dir / "hy_oas.png",
-            hline=HY_OAS_ABS_THRESHOLD,
+            threshold_lines=[
+                ThresholdLine("STRESS", HY_OAS_ABS_THRESHOLD, STRESS_LINE_COLOR),
+                ThresholdLine("CRISIS", HY_OAS_CRISIS_THRESHOLD, CRISIS_LINE_COLOR),
+            ],
         )
     )
     paths.append(
@@ -430,7 +502,10 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
             "Credit Stress: BBB OAS",
             "Percent",
             out_dir / "bbb_oas.png",
-            hline=BBB_OAS_ABS_THRESHOLD,
+            threshold_lines=[
+                ThresholdLine("STRESS", BBB_OAS_ABS_THRESHOLD, STRESS_LINE_COLOR),
+                ThresholdLine("CRISIS", BBB_OAS_CRISIS_THRESHOLD, CRISIS_LINE_COLOR),
+            ],
         )
     )
     paths.append(
@@ -439,7 +514,18 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
             "Liquidity Stress: SOFR - EFFR Spread",
             "Basis Points",
             out_dir / "sofr_effr_spread.png",
-            hline=SOFR_EFFR_SPREAD_BPS_THRESHOLD,
+            threshold_lines=[
+                ThresholdLine(
+                    "STRESS",
+                    SOFR_EFFR_SPREAD_BPS_THRESHOLD,
+                    STRESS_LINE_COLOR,
+                ),
+                ThresholdLine(
+                    "CRISIS",
+                    SOFR_EFFR_SPREAD_BPS_CRISIS_THRESHOLD,
+                    CRISIS_LINE_COLOR,
+                ),
+            ],
         )
     )
     paths.append(
@@ -448,6 +534,20 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
             "Liquidity Stress: RRP Total",
             "Amount",
             out_dir / "rrp_total.png",
+            threshold_series=[
+                build_dynamic_threshold_series(
+                    signals["rrp_total"],
+                    RRP_Z_THRESHOLD,
+                    f"STRESS (rolling z={RRP_Z_THRESHOLD:.2f})",
+                    STRESS_LINE_COLOR,
+                ),
+                build_dynamic_threshold_series(
+                    signals["rrp_total"],
+                    RRP_Z_CRISIS_THRESHOLD,
+                    f"CRISIS (rolling z={RRP_Z_CRISIS_THRESHOLD:.2f})",
+                    CRISIS_LINE_COLOR,
+                ),
+            ],
         )
     )
 
@@ -457,6 +557,20 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
             "Credit Stress: HY - BBB Spread (Dispersion)",
             "Percent",
             out_dir / "hy_minus_bbb.png",
+            threshold_series=[
+                build_dynamic_threshold_series(
+                    signals["hy_minus_bbb"],
+                    OAS_Z_THRESHOLD,
+                    f"STRESS (rolling z={OAS_Z_THRESHOLD:.2f})",
+                    STRESS_LINE_COLOR,
+                ),
+                build_dynamic_threshold_series(
+                    signals["hy_minus_bbb"],
+                    OAS_Z_CRISIS_THRESHOLD,
+                    f"CRISIS (rolling z={OAS_Z_CRISIS_THRESHOLD:.2f})",
+                    CRISIS_LINE_COLOR,
+                ),
+            ],
         )
     )
     if "repo_total" in signals:
@@ -466,6 +580,20 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
                 "Liquidity Stress: Repo Total",
                 "Amount",
                 out_dir / "repo_total.png",
+                threshold_series=[
+                    build_dynamic_threshold_series(
+                        signals["repo_total"],
+                        REPO_Z_THRESHOLD,
+                        f"STRESS (rolling z={REPO_Z_THRESHOLD:.2f})",
+                        STRESS_LINE_COLOR,
+                    ),
+                    build_dynamic_threshold_series(
+                        signals["repo_total"],
+                        REPO_Z_CRISIS_THRESHOLD,
+                        f"CRISIS (rolling z={REPO_Z_CRISIS_THRESHOLD:.2f})",
+                        CRISIS_LINE_COLOR,
+                    ),
+                ],
             )
         )
 
@@ -476,6 +604,18 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
                 "System Stress: Composite Stress Score",
                 "Score",
                 out_dir / "stress_score.png",
+                threshold_lines=[
+                    ThresholdLine(
+                        "STRESS",
+                        STRESS_SCORE_STRESS_THRESHOLD,
+                        STRESS_LINE_COLOR,
+                    ),
+                    ThresholdLine(
+                        "CRISIS",
+                        STRESS_SCORE_CRISIS_THRESHOLD,
+                        CRISIS_LINE_COLOR,
+                    ),
+                ],
             )
         )
 
@@ -486,7 +626,18 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
                 "System Stress: Stress Probability",
                 "Percent",
                 out_dir / "stress_probability.png",
-                hline=75.0,
+                threshold_lines=[
+                    ThresholdLine(
+                        "STRESS",
+                        STRESS_PROB_STRESS * 100.0,
+                        STRESS_LINE_COLOR,
+                    ),
+                    ThresholdLine(
+                        "CRISIS",
+                        STRESS_PROB_CRISIS * 100.0,
+                        CRISIS_LINE_COLOR,
+                    ),
+                ],
             )
         )
     return paths
@@ -509,43 +660,68 @@ def format_latest_signal_text(
     return f"{fmt.format(val)} on {d.date()}"
 
 
+def format_threshold_pair(
+    stress_value: float,
+    crisis_value: float,
+    unit: str = "",
+    decimals: int = 2,
+) -> str:
+    suffix = f" {unit}" if unit else ""
+    return (
+        f"STRESS at {stress_value:.{decimals}f}{suffix} and "
+        f"CRISIS at {crisis_value:.{decimals}f}{suffix}"
+    )
+
+
 def get_signal_explanations() -> Dict[str, str]:
     return {
         "hy_oas": (
             "High Yield OAS shows how much extra yield lower-quality corporate debt "
             "is paying over safer bonds. Higher values usually mean investors are "
-            "getting more worried about credit risk."
+            "getting more worried about credit risk. "
+            f"{format_threshold_pair(HY_OAS_ABS_THRESHOLD, HY_OAS_CRISIS_THRESHOLD, '%')}."
         ),
         "bbb_oas": (
             "BBB OAS tracks extra yield for the lower end of investment-grade debt. "
-            "If this rises, financing conditions are getting tighter even for better-quality borrowers."
+            "If this rises, financing conditions are getting tighter even for better-quality borrowers. "
+            f"{format_threshold_pair(BBB_OAS_ABS_THRESHOLD, BBB_OAS_CRISIS_THRESHOLD, '%')}."
         ),
         "hy_minus_bbb": (
             "HY minus BBB shows the gap between weaker and stronger corporate borrowers. "
-            "When this gap widens, markets are becoming more selective and more concerned about risky credit."
+            "When this gap widens, markets are becoming more selective and more concerned about risky credit. "
+            "On the chart, the dashed thresholds are rolling levels implied by the z-score trigger: "
+            f"{format_threshold_pair(OAS_Z_THRESHOLD, OAS_Z_CRISIS_THRESHOLD)}."
         ),
         "sofr_effr_spread_bps": (
             "SOFR minus EFFR is a short-term funding stress signal. "
-            "A bigger spread can mean stress in market plumbing or tighter liquidity conditions."
+            "A bigger spread can mean stress in market plumbing or tighter liquidity conditions. "
+            f"{format_threshold_pair(SOFR_EFFR_SPREAD_BPS_THRESHOLD, SOFR_EFFR_SPREAD_BPS_CRISIS_THRESHOLD, 'bps', 1)}."
         ),
         "rrp_total": (
             "RRP total shows usage of the Fed's reverse repo facility. "
-            "It is more of a liquidity context signal than a direct crisis signal by itself."
+            "It is more of a liquidity context signal than a direct crisis signal by itself. "
+            "The chart keeps the raw series and overlays rolling thresholds implied by the z-score trigger: "
+            f"{format_threshold_pair(RRP_Z_THRESHOLD, RRP_Z_CRISIS_THRESHOLD)}."
         ),
         "repo_total": (
             "Repo total reflects secured short-term funding activity. "
-            "Large unusual moves can indicate stress in funding markets or demand for cash."
+            "Large unusual moves can indicate stress in funding markets or demand for cash. "
+            "The chart keeps the raw series and overlays rolling thresholds implied by the z-score trigger: "
+            f"{format_threshold_pair(REPO_Z_THRESHOLD, REPO_Z_CRISIS_THRESHOLD)}."
         ),
         "stress_score": (
             "Stress score is a combined signal built from credit and liquidity indicators. "
-            "Higher values mean more overall market stress."
+            "Higher values mean more overall market stress. "
+            f"{format_threshold_pair(STRESS_SCORE_STRESS_THRESHOLD, STRESS_SCORE_CRISIS_THRESHOLD)}."
         ),
         "stress_prob": (
             "Stress probability converts the combined stress score into a 0 to 1 scale. "
-            "Higher values mean a greater chance that markets are in a stressed regime."
+            "Higher values mean a greater chance that markets are in a stressed regime. "
+            f"{format_threshold_pair(STRESS_PROB_STRESS * 100.0, STRESS_PROB_CRISIS * 100.0, '%', 0)}."
         ),
         "stress_regime": (
-            "Stress regime is the overall label for current conditions: NORMAL, WATCH, STRESS, or CRISIS."
+            "Stress regime is the overall label for current conditions: NORMAL, WATCH, STRESS, or CRISIS. "
+            f"STRESS begins at {STRESS_PROB_STRESS:.0%} probability and CRISIS begins at {STRESS_PROB_CRISIS:.0%} probability."
         ),
     }
 
@@ -554,27 +730,36 @@ def get_chart_explanations() -> Dict[str, str]:
     return {
         "hy_oas": (
             "This chart shows extra yield demanded for riskier corporate debt. "
-            "A rise usually means credit markets are getting nervous."
+            "A rise usually means credit markets are getting nervous. "
+            f"The dashed lines mark {format_threshold_pair(HY_OAS_ABS_THRESHOLD, HY_OAS_CRISIS_THRESHOLD, '%')}."
         ),
         "bbb_oas": (
             "This chart shows extra yield for BBB-rated debt. "
-            "A rise suggests tighter borrowing conditions for investment-grade companies."
+            "A rise suggests tighter borrowing conditions for investment-grade companies. "
+            f"The dashed lines mark {format_threshold_pair(BBB_OAS_ABS_THRESHOLD, BBB_OAS_CRISIS_THRESHOLD, '%')}."
         ),
         "hy_minus_bbb": (
             "This chart shows the gap between high-yield and BBB spreads. "
-            "A widening gap often means weaker borrowers are coming under more pressure."
+            "A widening gap often means weaker borrowers are coming under more pressure. "
+            "The dashed lines are rolling threshold levels implied by the z-score trigger at "
+            f"{format_threshold_pair(OAS_Z_THRESHOLD, OAS_Z_CRISIS_THRESHOLD)}."
         ),
         "sofr_effr_spread": (
             "This chart shows short-term funding stress. "
-            "Spikes can signal strain in the market's plumbing even before broader risk markets react."
+            "Spikes can signal strain in the market's plumbing even before broader risk markets react. "
+            f"The dashed lines mark {format_threshold_pair(SOFR_EFFR_SPREAD_BPS_THRESHOLD, SOFR_EFFR_SPREAD_BPS_CRISIS_THRESHOLD, 'bps', 1)}."
         ),
         "rrp_total": (
             "This chart shows reverse repo facility usage. "
-            "It helps describe liquidity conditions, though it should be interpreted with other signals."
+            "It helps describe liquidity conditions, though it should be interpreted with other signals. "
+            "The dashed lines are rolling threshold levels implied by the z-score trigger at "
+            f"{format_threshold_pair(RRP_Z_THRESHOLD, RRP_Z_CRISIS_THRESHOLD)}."
         ),
         "repo_total": (
             "This chart shows repo market activity. "
-            "Unusual jumps may point to funding demand or liquidity strain."
+            "Unusual jumps may point to funding demand or liquidity strain. "
+            "The dashed lines are rolling threshold levels implied by the z-score trigger at "
+            f"{format_threshold_pair(REPO_Z_THRESHOLD, REPO_Z_CRISIS_THRESHOLD)}."
         ),
         "latent_stress": (
             "This chart shows the model's overall stress level after combining multiple indicators. "
@@ -582,11 +767,13 @@ def get_chart_explanations() -> Dict[str, str]:
         ),
         "stress_probability": (
             "This chart shows the model's estimated probability that markets are in a stressed state. "
-            "Higher values mean more caution is warranted."
+            "Higher values mean more caution is warranted. "
+            f"The dashed lines mark {format_threshold_pair(STRESS_PROB_STRESS * 100.0, STRESS_PROB_CRISIS * 100.0, '%', 0)}."
         ),
         "stress_score": (
             "This chart shows the combined stress score built from credit and liquidity signals. "
-            "Higher values mean broader market stress is building."
+            "Higher values mean broader market stress is building. "
+            f"The dashed lines mark {format_threshold_pair(STRESS_SCORE_STRESS_THRESHOLD, STRESS_SCORE_CRISIS_THRESHOLD)}."
         ),
     }
 
