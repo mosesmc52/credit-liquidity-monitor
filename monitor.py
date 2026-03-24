@@ -487,7 +487,7 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
     paths.append(
         make_line_chart(
             last_n_days(signals["hy_oas"], CHART_LOOKBACK_DAYS),
-            "Credit Stress: High Yield OAS",
+            "Credit Stress: HY OAS",
             "Percent",
             out_dir / "hy_oas.png",
             threshold_lines=[
@@ -511,7 +511,7 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
     paths.append(
         make_line_chart(
             last_n_days(signals["sofr_effr_spread_bps"], CHART_LOOKBACK_DAYS),
-            "Liquidity Stress: SOFR - EFFR Spread",
+            "Liquidity Stress: SOFR-EFFR spread",
             "Basis Points",
             out_dir / "sofr_effr_spread.png",
             threshold_lines=[
@@ -530,23 +530,13 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
     )
     paths.append(
         make_line_chart(
-            last_n_days(signals["rrp_total"], CHART_LOOKBACK_DAYS),
+            last_n_days(signals["rrp_total_z"], CHART_LOOKBACK_DAYS),
             "Liquidity Stress: RRP Total",
-            "Amount",
+            "Z-Score",
             out_dir / "rrp_total.png",
-            threshold_series=[
-                build_dynamic_threshold_series(
-                    signals["rrp_total"],
-                    RRP_Z_THRESHOLD,
-                    f"STRESS (rolling z={RRP_Z_THRESHOLD:.2f})",
-                    STRESS_LINE_COLOR,
-                ),
-                build_dynamic_threshold_series(
-                    signals["rrp_total"],
-                    RRP_Z_CRISIS_THRESHOLD,
-                    f"CRISIS (rolling z={RRP_Z_CRISIS_THRESHOLD:.2f})",
-                    CRISIS_LINE_COLOR,
-                ),
+            threshold_lines=[
+                ThresholdLine("STRESS", RRP_Z_THRESHOLD, STRESS_LINE_COLOR),
+                ThresholdLine("CRISIS", RRP_Z_CRISIS_THRESHOLD, CRISIS_LINE_COLOR),
             ],
         )
     )
@@ -554,7 +544,7 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
     paths.append(
         make_line_chart(
             last_n_days(signals["hy_minus_bbb"], CHART_LOOKBACK_DAYS),
-            "Credit Stress: HY - BBB Spread (Dispersion)",
+            "Credit Stress: HY - BBB",
             "Percent",
             out_dir / "hy_minus_bbb.png",
             threshold_series=[
@@ -750,9 +740,9 @@ def get_chart_explanations() -> Dict[str, str]:
             f"The dashed lines mark {format_threshold_pair(SOFR_EFFR_SPREAD_BPS_THRESHOLD, SOFR_EFFR_SPREAD_BPS_CRISIS_THRESHOLD, 'bps', 1)}."
         ),
         "rrp_total": (
-            "This chart shows reverse repo facility usage. "
-            "It helps describe liquidity conditions, though it should be interpreted with other signals. "
-            "The dashed lines are rolling threshold levels implied by the z-score trigger at "
+            "This chart shows the rolling z-score of reverse repo facility usage rather than the raw amount. "
+            "Higher values mean usage is elevated relative to its recent baseline. "
+            "The dashed lines mark the z-score trigger levels at "
             f"{format_threshold_pair(RRP_Z_THRESHOLD, RRP_Z_CRISIS_THRESHOLD)}."
         ),
         "repo_total": (
@@ -791,7 +781,7 @@ def build_snapshot_html(signals: Dict[str, pd.Series]) -> str:
             "{:.1f} bps",
             explanations["sofr_effr_spread_bps"],
         ),
-        ("RRP total", "rrp_total", "{:,.0f}", explanations["rrp_total"]),
+        ("RRP total", "rrp_total_z", "{:.2f}", explanations["rrp_total"]),
     ]
 
     if "repo_total" in signals:
@@ -889,6 +879,16 @@ def build_regime_html(signals: Dict[str, pd.Series]) -> str:
 
 def build_chart_section_html(chart_paths: List[Path]) -> str:
     explanations = get_chart_explanations()
+    titles = {
+        "hy_oas": "HY OAS",
+        "bbb_oas": "BBB OAS",
+        "sofr_effr_spread": "SOFR-EFFR spread",
+        "rrp_total": "RRP Total",
+        "hy_minus_bbb": "HY - BBB",
+        "repo_total": "Repo Total",
+        "stress_score": "Composite Stress Score",
+        "stress_probability": "Stress Probability",
+    }
     blocks = []
 
     for p in chart_paths:
@@ -898,7 +898,7 @@ def build_chart_section_html(chart_paths: List[Path]) -> str:
             "This chart shows one part of the monitoring system. Higher or unusual moves may indicate building stress.",
         )
 
-        title = stem.replace("_", " ").title()
+        title = titles.get(stem, stem.replace("_", " ").title())
         blocks.append(
             f"""
             <div style="margin-bottom: 28px;">

@@ -93,10 +93,16 @@ def last_n_days(s: pd.Series, days: int = 90) -> pd.Series:
 
 
 def rolling_zscore(s: pd.Series, window: int) -> pd.Series:
-    mu = s.rolling(window).mean()
-    sigma = s.rolling(window).std(ddof=0)
-    z = (s - mu) / sigma.replace(0.0, pd.NA)
-    return z
+    clean = s.dropna()
+    if clean.empty:
+        return s.astype(float)
+
+    effective_window = min(window, len(clean))
+    min_periods = min(effective_window, 5)
+    mu = clean.rolling(effective_window, min_periods=min_periods).mean()
+    sigma = clean.rolling(effective_window, min_periods=min_periods).std(ddof=0)
+    z = (clean - mu) / sigma.replace(0.0, pd.NA)
+    return z.reindex(s.index)
 
 
 def latest_valid(s: pd.Series) -> Optional[float]:
