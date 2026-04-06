@@ -49,8 +49,8 @@ write_files:
     permissions: "0600"
     content: |
       TZ={env.get("TZ", "")}
+      SEND_ONLY_ON_ALERT={env.get("SEND_ONLY_ON_ALERT", "")}
       FRED_API_KEY={env.get("FRED_API_KEY", "")}
-      EMAIL_POSITIONS={env.get("EMAIL_POSITIONS", "")}
       TO_ADDRESSES={env.get("TO_ADDRESSES", "")}
       FROM_ADDRESS={env.get("FROM_ADDRESS", "")}
       AWS_SES_REGION_NAME={env.get("AWS_SES_REGION_NAME", "")}
@@ -137,8 +137,8 @@ def main(event, context):
                 "TZ": optional_env("TZ"),
                 "GHCR_USERNAME": optional_env("GHCR_USERNAME"),
                 "GHCR_TOKEN": optional_env("GHCR_TOKEN"),
+                "SEND_ONLY_ON_ALERT": optional_env("SEND_ONLY_ON_ALERT"),
                 "FRED_API_KEY": optional_env("FRED_API_KEY"),
-                "EMAIL_POSITIONS": optional_env("EMAIL_POSITIONS"),
                 "TO_ADDRESSES": optional_env("TO_ADDRESSES"),
                 "FROM_ADDRESS": optional_env("FROM_ADDRESS"),
                 "AWS_SES_REGION_NAME": optional_env("AWS_SES_REGION_NAME"),

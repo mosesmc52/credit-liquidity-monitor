@@ -2,10 +2,15 @@
 	help shell do-fn-validate do-fn-connect do-fn-status do-fn-deploy do-fn-deploy-remote \
 	do-fn-list do-fn-get do-fn-invoke do-fn-activations do-fn-logs do-droplet-log
 
-WORKER_CONTAINER=credit_liquidity_monito
+WORKER_CONTAINER=credit_liquidity_monitor
 
 # Default Compose files
 MAIN_COMPOSE_FILE := docker-compose.yml
+DO_FN_DIR ?= infra/do-functions
+DO_FN_ENV ?= infra/do-functions/.env
+DO_FN_NAME ?= launcher/credit-liquidity-monitor
+DROPLET_USER ?= root
+DROPLET_LOG_FILE ?= /var/log/job.log
 
 # Quickly view available targets
 help:
@@ -23,7 +28,7 @@ help:
 	@echo "  do-fn-deploy-remote Deploy infra/do-functions using remote build"
 	@echo "  do-fn-list          List deployed DO functions"
 	@echo "  do-fn-get           Show deployed function metadata"
-	@echo "  do-fn-invoke        Invoke launcher/gas-balance-risk"
+	@echo "  do-fn-invoke        Invoke $(DO_FN_NAME)"
 	@echo "  do-fn-activations   List recent activations"
 	@echo "  do-fn-logs          Show logs for ACTIVATION=<id>"
 	@echo "  do-droplet-log      Tail droplet log over SSH with DROPLET_IP=<ip>"
