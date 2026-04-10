@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -106,6 +111,9 @@ SEND_ONLY_ON_ALERT = str2bool(os.getenv("SEND_ONLY_ON_ALERT", True))
 INCLUDE_REPO_TOTAL = str2bool(os.getenv("INCLUDE_REPO_TOTAL", False))
 
 CHART_LOOKBACK_DAYS = getenv_int(os.getenv("CHART_LOOKBACK_DAYS"), 90)
+FRED_MAX_RETRIES = getenv_int(os.getenv("FRED_MAX_RETRIES"), 3)
+FRED_RETRY_DELAY_SECONDS = getenv_float(os.getenv("FRED_RETRY_DELAY_SECONDS"), 1.5)
+FRED_TIMEOUT_SECONDS = getenv_int(os.getenv("FRED_TIMEOUT_SECONDS"), 30)
 
 HY_OAS_CRISIS_THRESHOLD = HY_OAS_ABS_THRESHOLD + 1.5
 BBB_OAS_CRISIS_THRESHOLD = BBB_OAS_ABS_THRESHOLD + 0.75
@@ -129,10 +137,88 @@ def fetch_fred_series(series_id: str, start_date, end_date) -> pd.Series:
     """
     Fetch a FRED series using fredapi and return a clean pandas Series.
     """
-    s = fred.get_series(
-        series_id, observation_start=start_date, observation_end=end_date
+    attempts = max(FRED_MAX_RETRIES, 1)
+    transient_failures: List[BaseException] = []
+
+    for label, fetcher in (
+        ("fredapi", _fetch_fred_series_with_fredapi),
+        ("direct FRED API", _fetch_fred_series_with_http_fallback),
+    ):
+        for attempt in range(1, attempts + 1):
+            try:
+                s = fetcher(series_id, start_date, end_date)
+                return _normalize_fred_series(s, series_id)
+            except Exception as exc:
+                if not _is_transient_fred_error(exc):
+                    raise
+
+                transient_failures.append(exc)
+                if attempt < attempts:
+                    delay = FRED_RETRY_DELAY_SECONDS * attempt
+                    print(
+                        f"Transient FRED error via {label} for {series_id} "
+                        f"(attempt {attempt}/{attempts}): {exc}. Retrying in {delay:.1f}s."
+                    )
+                    time.sleep(delay)
+                    continue
+
+                print(
+                    f"Transient FRED error via {label} for {series_id} "
+                    f"after {attempts} attempts: {exc}."
+                )
+
+    if transient_failures:
+        print(
+            f"Warning: unable to fetch FRED series {series_id}; continuing with empty data. "
+            f"Last error: {transient_failures[-1]}"
+        )
+
+    return pd.Series(dtype=float, name=series_id)
+
+
+def _fetch_fred_series_with_fredapi(series_id: str, start_date, end_date) -> pd.Series:
+    return fred.get_series(
+        series_id,
+        observation_start=start_date,
+        observation_end=end_date,
     )
 
+
+def _fetch_fred_series_with_http_fallback(
+    series_id: str, start_date, end_date
+) -> pd.Series:
+    params = urlencode(
+        {
+            "series_id": series_id,
+            "api_key": FRED_API_KEY,
+            "file_type": "json",
+            "observation_start": start_date.isoformat(),
+            "observation_end": end_date.isoformat(),
+            "sort_order": "asc",
+        }
+    )
+    url = f"https://api.stlouisfed.org/fred/series/observations?{params}"
+
+    with urlopen(url, timeout=FRED_TIMEOUT_SECONDS) as response:
+        payload = json.load(response)
+
+    if "error_code" in payload:
+        raise ValueError(payload.get("error_message") or payload["error_code"])
+
+    observations = payload.get("observations", [])
+    if not observations:
+        return pd.Series(dtype=float, name=series_id)
+
+    df = pd.DataFrame(observations)
+    if "date" not in df.columns or "value" not in df.columns:
+        raise ValueError(f"Unexpected FRED payload for series {series_id}")
+
+    s = pd.to_numeric(df["value"], errors="coerce")
+    s.index = pd.to_datetime(df["date"])
+    return s
+
+
+def _normalize_fred_series(s: Optional[pd.Series], series_id: str) -> pd.Series:
     if s is None or s.empty:
         return pd.Series(dtype=float, name=series_id)
 
@@ -141,6 +227,28 @@ def fetch_fred_series(series_id: str, start_date, end_date) -> pd.Series:
     s = s.sort_index()
     s.name = series_id
     return s
+
+
+def _is_transient_fred_error(exc: BaseException) -> bool:
+    if isinstance(exc, HTTPError):
+        return exc.code in {429, 500, 502, 503, 504}
+
+    if isinstance(exc, URLError):
+        return True
+
+    if isinstance(exc, ValueError):
+        message = str(exc).lower()
+        transient_markers = (
+            "internal server error",
+            "bad gateway",
+            "service unavailable",
+            "gateway timeout",
+            "temporarily unavailable",
+            "too many requests",
+        )
+        return any(marker in message for marker in transient_markers)
+
+    return False
 
 
 # =========================
