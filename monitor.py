@@ -114,6 +114,16 @@ CHART_LOOKBACK_DAYS = getenv_int(os.getenv("CHART_LOOKBACK_DAYS"), 90)
 FRED_MAX_RETRIES = getenv_int(os.getenv("FRED_MAX_RETRIES"), 3)
 FRED_RETRY_DELAY_SECONDS = getenv_float(os.getenv("FRED_RETRY_DELAY_SECONDS"), 1.5)
 FRED_TIMEOUT_SECONDS = getenv_int(os.getenv("FRED_TIMEOUT_SECONDS"), 30)
+INFLATION_LOOKBACK_DAYS = getenv_int(os.getenv("INFLATION_LOOKBACK_DAYS"), 5)
+INFLATION_DGS10_MOVE_BPS_THRESHOLD = getenv_float(
+    os.getenv("INFLATION_DGS10_MOVE_BPS_THRESHOLD"), 15.0
+)
+INFLATION_T10YIE_MOVE_BPS_THRESHOLD = getenv_float(
+    os.getenv("INFLATION_T10YIE_MOVE_BPS_THRESHOLD"), 8.0
+)
+INFLATION_SELL_OFF_Z_THRESHOLD = getenv_float(
+    os.getenv("INFLATION_SELL_OFF_Z_THRESHOLD"), 1.5
+)
 
 HY_OAS_CRISIS_THRESHOLD = HY_OAS_ABS_THRESHOLD + 1.5
 BBB_OAS_CRISIS_THRESHOLD = BBB_OAS_ABS_THRESHOLD + 0.75
@@ -282,6 +292,8 @@ def analyze_credit_liquidity(
     sofr: pd.Series,
     effr: pd.Series,
     rrp_total: pd.Series,
+    dgs10: pd.Series,
+    t10yie: pd.Series,
     repo_total: Optional[pd.Series] = None,
     rolling_window: int = 60,
 ) -> tuple[List[AlertEvent], Dict[str, pd.Series]]:
@@ -324,6 +336,31 @@ def analyze_credit_liquidity(
     if repo_total is not None and not repo_total.empty:
         signals["repo_total"] = repo_total.sort_index()
         signals["repo_total_z"] = rolling_zscore(signals["repo_total"], rolling_window)
+
+    # ----------------------------
+    # Macro / inflation context
+    # ----------------------------
+    inflation = pd.concat(
+        [dgs10.rename("DGS10"), t10yie.rename("T10YIE")],
+        axis=1,
+        sort=False,
+    ).sort_index()
+    inflation = inflation.ffill()
+
+    signals["dgs10"] = inflation["DGS10"]
+    signals["t10yie"] = inflation["T10YIE"]
+    signals["real_10y_proxy"] = signals["dgs10"] - signals["t10yie"]
+
+    lookback = max(INFLATION_LOOKBACK_DAYS, 1)
+    signals["dgs10_change_bps"] = signals["dgs10"].diff(lookback) * 100.0
+    signals["t10yie_change_bps"] = signals["t10yie"].diff(lookback) * 100.0
+    signals["real_10y_proxy_change_bps"] = signals["real_10y_proxy"].diff(lookback) * 100.0
+
+    inflation_joint_move = signals["dgs10_change_bps"] + signals["t10yie_change_bps"]
+    signals["inflation_selloff_score"] = inflation_joint_move
+    signals["inflation_selloff_z"] = rolling_zscore(
+        signals["inflation_selloff_score"], rolling_window
+    )
 
     # ----------------------------
     # Composite stress score
@@ -507,6 +544,62 @@ def analyze_credit_liquidity(
             )
 
     # ----------------------------
+    # Macro / inflation alerts
+    # ----------------------------
+    dgs10_change_latest = latest_valid(signals["dgs10_change_bps"])
+    t10yie_change_latest = latest_valid(signals["t10yie_change_bps"])
+    inflation_selloff_z_latest = latest_valid(signals["inflation_selloff_z"])
+
+    inflation_selloff_triggered = (
+        dgs10_change_latest is not None
+        and t10yie_change_latest is not None
+        and dgs10_change_latest >= INFLATION_DGS10_MOVE_BPS_THRESHOLD
+        and t10yie_change_latest >= INFLATION_T10YIE_MOVE_BPS_THRESHOLD
+    )
+
+    if inflation_selloff_triggered:
+        severity = (
+            "high"
+            if dgs10_change_latest >= INFLATION_DGS10_MOVE_BPS_THRESHOLD + 10.0
+            and t10yie_change_latest >= INFLATION_T10YIE_MOVE_BPS_THRESHOLD + 5.0
+            else "medium"
+        )
+        alerts.append(
+            AlertEvent(
+                category="macro",
+                name="Inflation-driven bond selloff",
+                severity=severity,
+                message=(
+                    f"Over {lookback} days, 10Y Treasury yield moved {dgs10_change_latest:.1f} bps "
+                    f"and 10Y breakeven inflation moved {t10yie_change_latest:.1f} bps higher. "
+                    "That combination is consistent with inflation fears driving yields up."
+                ),
+            )
+        )
+
+    if inflation_selloff_z_latest is not None and (
+        inflation_selloff_z_latest >= INFLATION_SELL_OFF_Z_THRESHOLD + 0.5
+        or last_n_above(
+            signals["inflation_selloff_z"], INFLATION_SELL_OFF_Z_THRESHOLD, 3
+        )
+    ):
+        alerts.append(
+            AlertEvent(
+                category="macro",
+                name="Inflation selloff z-score",
+                severity=(
+                    "high"
+                    if inflation_selloff_z_latest >= INFLATION_SELL_OFF_Z_THRESHOLD + 1.0
+                    else "medium"
+                ),
+                message=(
+                    f"Inflation selloff z-score is {inflation_selloff_z_latest:.2f} "
+                    f"(threshold {INFLATION_SELL_OFF_Z_THRESHOLD:.2f})."
+                ),
+            )
+        )
+
+    # ----------------------------
     # System / regime alert
     # ----------------------------
     if regime != "NORMAL":
@@ -671,6 +764,37 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
             ],
         )
     )
+    paths.append(
+        make_line_chart(
+            last_n_days(signals["inflation_selloff_score"], CHART_LOOKBACK_DAYS),
+            "Macro Context: Inflation-Driven Bond Selloff",
+            f"{INFLATION_LOOKBACK_DAYS}-Day Move (bps sum)",
+            out_dir / "inflation_selloff.png",
+            threshold_lines=[
+                ThresholdLine(
+                    "STRESS",
+                    INFLATION_DGS10_MOVE_BPS_THRESHOLD
+                    + INFLATION_T10YIE_MOVE_BPS_THRESHOLD,
+                    STRESS_LINE_COLOR,
+                ),
+                ThresholdLine(
+                    "CRISIS",
+                    INFLATION_DGS10_MOVE_BPS_THRESHOLD
+                    + INFLATION_T10YIE_MOVE_BPS_THRESHOLD
+                    + 15.0,
+                    CRISIS_LINE_COLOR,
+                ),
+            ],
+        )
+    )
+    paths.append(
+        make_line_chart(
+            last_n_days(signals["real_10y_proxy"], CHART_LOOKBACK_DAYS),
+            "Macro Context: 10Y Real Yield Proxy",
+            "Percent",
+            out_dir / "real_10y_proxy.png",
+        )
+    )
     if "repo_total" in signals:
         paths.append(
             make_line_chart(
@@ -795,6 +919,23 @@ def get_signal_explanations() -> Dict[str, str]:
             "A bigger spread can mean stress in market plumbing or tighter liquidity conditions. "
             f"{format_threshold_pair(SOFR_EFFR_SPREAD_BPS_THRESHOLD, SOFR_EFFR_SPREAD_BPS_CRISIS_THRESHOLD, 'bps', 1)}."
         ),
+        "dgs10": (
+            "10Y Treasury yield is the nominal long-term government yield. "
+            "When it rises alongside breakeven inflation, the move is more consistent with inflation fear than with growth optimism."
+        ),
+        "t10yie": (
+            "10Y breakeven inflation is the market's implied inflation expectation. "
+            "A rise means investors are demanding more compensation for expected inflation."
+        ),
+        "inflation_selloff_score": (
+            f"This combines the {INFLATION_LOOKBACK_DAYS}-day change in 10Y Treasury yields and "
+            "10Y breakeven inflation. Higher values mean nominal yields and inflation expectations are rising together, "
+            "which is the pattern expected in an inflation-driven bond selloff."
+        ),
+        "real_10y_proxy": (
+            "Real 10Y yield proxy is nominal 10Y Treasury yield minus 10Y breakeven inflation. "
+            "If nominal yields rise but breakevens do not, the move is more likely coming from real yields than inflation fears."
+        ),
         "rrp_total": (
             "RRP total shows usage of the Fed's reverse repo facility. "
             "It is more of a liquidity context signal than a direct crisis signal by itself. "
@@ -847,6 +988,14 @@ def get_chart_explanations() -> Dict[str, str]:
             "Spikes can signal strain in the market's plumbing even before broader risk markets react. "
             f"The dashed lines mark {format_threshold_pair(SOFR_EFFR_SPREAD_BPS_THRESHOLD, SOFR_EFFR_SPREAD_BPS_CRISIS_THRESHOLD, 'bps', 1)}."
         ),
+        "inflation_selloff": (
+            f"This chart adds the {INFLATION_LOOKBACK_DAYS}-day change in 10Y Treasury yields and "
+            "10Y breakeven inflation. Rising together suggests selling pressure in bonds is being driven by inflation expectations."
+        ),
+        "real_10y_proxy": (
+            "This chart shows nominal 10Y Treasury yields minus 10Y breakeven inflation. "
+            "It helps separate inflation-driven yield moves from real-rate moves."
+        ),
         "rrp_total": (
             "This chart shows the rolling z-score of reverse repo facility usage rather than the raw amount. "
             "Higher values mean usage is elevated relative to its recent baseline. "
@@ -883,11 +1032,25 @@ def build_snapshot_html(signals: Dict[str, pd.Series]) -> str:
         ("HY OAS", "hy_oas", "{:.2f}%", explanations["hy_oas"]),
         ("BBB OAS", "bbb_oas", "{:.2f}%", explanations["bbb_oas"]),
         ("HY - BBB", "hy_minus_bbb", "{:.2f}%", explanations["hy_minus_bbb"]),
+        ("10Y Treasury", "dgs10", "{:.2f}%", explanations["dgs10"]),
+        ("10Y breakeven", "t10yie", "{:.2f}%", explanations["t10yie"]),
+        (
+            "Inflation selloff score",
+            "inflation_selloff_score",
+            "{:.1f} bps",
+            explanations["inflation_selloff_score"],
+        ),
         (
             "SOFR-EFFR spread",
             "sofr_effr_spread_bps",
             "{:.1f} bps",
             explanations["sofr_effr_spread_bps"],
+        ),
+        (
+            "10Y real yield proxy",
+            "real_10y_proxy",
+            "{:.2f}%",
+            explanations["real_10y_proxy"],
         ),
         ("RRP total", "rrp_total_z", "{:.2f}", explanations["rrp_total"]),
     ]
@@ -926,6 +1089,63 @@ def build_snapshot_html(signals: Dict[str, pd.Series]) -> str:
           <th style="padding: 8px; border: 1px solid #ddd; text-align: left;">Field</th>
           <th style="padding: 8px; border: 1px solid #ddd; text-align: left;">Latest</th>
           <th style="padding: 8px; border: 1px solid #ddd; text-align: left;">What it means</th>
+        </tr>
+      </thead>
+      <tbody>
+        {''.join(html_rows)}
+      </tbody>
+    </table>
+    """
+
+
+def build_metric_guide_html(signals: Dict[str, pd.Series]) -> str:
+    explanations = get_signal_explanations()
+    metric_rows = [
+        ("Credit", "HY OAS", explanations["hy_oas"]),
+        ("Credit", "BBB OAS", explanations["bbb_oas"]),
+        ("Credit", "HY - BBB", explanations["hy_minus_bbb"]),
+        ("Macro", "10Y Treasury", explanations["dgs10"]),
+        ("Macro", "10Y breakeven", explanations["t10yie"]),
+        ("Macro", "Inflation selloff score", explanations["inflation_selloff_score"]),
+        ("Macro", "10Y real yield proxy", explanations["real_10y_proxy"]),
+        ("Liquidity", "SOFR-EFFR spread", explanations["sofr_effr_spread_bps"]),
+        ("Liquidity", "RRP total z-score", explanations["rrp_total"]),
+    ]
+
+    if "repo_total" in signals:
+        metric_rows.append(("Liquidity", "Repo total", explanations["repo_total"]))
+
+    if "stress_score" in signals:
+        metric_rows.append(("System", "Stress score", explanations["stress_score"]))
+
+    if "stress_prob" in signals:
+        metric_rows.append(("System", "Stress probability", explanations["stress_prob"]))
+
+    metric_rows.append(("System", "Stress regime", explanations["stress_regime"]))
+
+    html_rows = []
+    for category, label, description in metric_rows:
+        html_rows.append(
+            f"""
+            <tr>
+              <td style="padding: 8px; border: 1px solid #ddd; vertical-align: top;"><b>{category}</b></td>
+              <td style="padding: 8px; border: 1px solid #ddd; vertical-align: top;"><b>{label}</b></td>
+              <td style="padding: 8px; border: 1px solid #ddd; vertical-align: top;">{description}</td>
+            </tr>
+            """
+        )
+
+    return f"""
+    <h3>Metric Guide</h3>
+    <p>
+      This summary explains what each monitored metric is intended to capture and how to interpret it in context.
+    </p>
+    <table style="border-collapse: collapse; width: 100%; max-width: 1100px; font-size: 14px;">
+      <thead>
+        <tr>
+          <th style="padding: 8px; border: 1px solid #ddd; text-align: left;">Category</th>
+          <th style="padding: 8px; border: 1px solid #ddd; text-align: left;">Metric</th>
+          <th style="padding: 8px; border: 1px solid #ddd; text-align: left;">Summary</th>
         </tr>
       </thead>
       <tbody>
@@ -993,6 +1213,8 @@ def build_chart_section_html(chart_paths: List[Path]) -> str:
         "sofr_effr_spread": "SOFR-EFFR spread",
         "rrp_total": "RRP Total",
         "hy_minus_bbb": "HY - BBB",
+        "inflation_selloff": "Inflation-Driven Bond Selloff",
+        "real_10y_proxy": "10Y Real Yield Proxy",
         "repo_total": "Repo Total",
         "stress_score": "Composite Stress Score",
         "stress_probability": "Stress Probability",
@@ -1034,6 +1256,7 @@ def render_alert_html(
     signals: Dict[str, pd.Series],
 ) -> str:
     regime_html = build_regime_html(signals)
+    metric_guide_html = build_metric_guide_html(signals)
     snapshot_html = build_snapshot_html(signals)
     alerts_html = build_alerts_html(alerts)
     charts_html = build_chart_section_html(chart_paths)
@@ -1050,6 +1273,8 @@ def render_alert_html(
         </p>
 
         {regime_html}
+
+        {metric_guide_html}
 
         {snapshot_html}
 
@@ -1076,6 +1301,8 @@ def main() -> None:
     # BBB OAS: BAMLC0A4CBBB
     hy_oas = fetch_fred_series("BAMLH0A0HYM2", start_date, end_date)
     bbb_oas = fetch_fred_series("BAMLC0A4CBBB", start_date, end_date)
+    dgs10 = fetch_fred_series("DGS10", start_date, end_date)
+    t10yie = fetch_fred_series("T10YIE", start_date, end_date)
 
     # NY Fed liquidity stress series using your client
     nyfed = NYFedClient(base_url=NYFED_BASE_URL)
@@ -1097,6 +1324,8 @@ def main() -> None:
         sofr=sofr,
         effr=effr,
         rrp_total=rrp_total,
+        dgs10=dgs10,
+        t10yie=t10yie,
         repo_total=repo_total,
         rolling_window=ROLLING_WINDOW,
     )

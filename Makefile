@@ -1,5 +1,5 @@
 .PHONY: up build daemon down clean logs upd \
-	help shell do-fn-validate do-fn-connect do-fn-status do-fn-deploy do-fn-deploy-remote \
+	help shell local-force do-fn-validate do-fn-connect do-fn-status do-fn-deploy do-fn-deploy-remote \
 	do-fn-list do-fn-get do-fn-invoke do-fn-activations do-fn-logs do-droplet-log
 
 WORKER_CONTAINER=credit_liquidity_monitor
@@ -18,6 +18,7 @@ help:
 	@echo "  down         Stop main stack"
 	@echo "  clean        Stop and remove volumes for main stack"
 	@echo "  logs         Follow logs for main stack"
+	@echo "  local-force  Run monitor locally with Poetry"
 
 # ---------------------------------------------------------------------
 # MAINCOMMANDS
@@ -44,3 +45,6 @@ logs:
 
 shell:
 	docker exec -it $(WORKER_CONTAINER) /bin/bash
+
+local-force:
+	poetry run python monitor.py
