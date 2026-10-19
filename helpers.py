@@ -5,6 +5,10 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+STRESS_INDEX_WATCH = 60.0
+STRESS_INDEX_STRESS = 75.0
+STRESS_INDEX_CRISIS = 85.0
+
 
 def str2bool(value):
     valid = {
@@ -68,14 +72,28 @@ def logistic_transform(s: pd.Series) -> pd.Series:
     return 1.0 / (1.0 + np.exp(-s))
 
 
-def classify_stress_regime(stress_prob: float) -> str:
-    if stress_prob >= 0.85:
+def classify_stress_regime(stress_index: float) -> str:
+    if pd.isna(stress_index):
+        return "UNKNOWN"
+    if stress_index >= STRESS_INDEX_CRISIS:
         return "CRISIS"
-    if stress_prob >= 0.75:
+    if stress_index >= STRESS_INDEX_STRESS:
         return "STRESS"
-    if stress_prob >= 0.60:
+    if stress_index >= STRESS_INDEX_WATCH:
         return "WATCH"
     return "NORMAL"
+
+
+def fresh_reindex(s: pd.Series, index: pd.DatetimeIndex, max_business_days: int = 3) -> pd.Series:
+    """Carry an observation forward only while its source date is recent."""
+    clean = s.dropna().sort_index()
+    if clean.empty:
+        return pd.Series(np.nan, index=index, dtype=float)
+    combined = index.union(clean.index)
+    values = clean.reindex(combined).ffill().reindex(index)
+    observed_at = pd.Series(clean.index, index=clean.index).reindex(combined).ffill().reindex(index)
+    earliest = pd.Series(index - pd.offsets.BDay(max_business_days), index=index)
+    return values.where(observed_at >= earliest)
 
 
 def last_n_days(s: pd.Series, days: int = 90) -> pd.Series:

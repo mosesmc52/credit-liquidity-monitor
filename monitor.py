@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import os
 import tempfile
 import time
@@ -17,6 +18,8 @@ import pandas as pd
 from dotenv import find_dotenv, load_dotenv
 from fredapi import Fred
 from helpers import (
+    STRESS_INDEX_CRISIS,
+    STRESS_INDEX_STRESS,
     classify_stress_regime,
     getenv_float,
     getenv_int,
@@ -24,13 +27,12 @@ from helpers import (
     last_n_days,
     latest_date,
     latest_valid,
-    logistic_transform,
     rolling_zscore,
     str2bool,
-    zero_series_like,
 )
 from nyfed_client import FetchSpec, NYFedClient
 from SES import AmazonSES
+from stress_model import compute_stress_indicator
 
 load_dotenv(find_dotenv())
 
@@ -87,10 +89,6 @@ SOFR_EFFR_SPREAD_BPS_THRESHOLD = 10.0
 RRP_Z_THRESHOLD = 2.25
 REPO_Z_THRESHOLD = 2.25
 
-STRESS_PROB_WATCH = 0.60
-STRESS_PROB_STRESS = 0.75
-STRESS_PROB_CRISIS = 0.85
-
 LOOKBACK_DAYS = getenv_int(os.getenv("LOOKBACK_DAYS"), 365)
 ROLLING_WINDOW = getenv_int(os.getenv("ROLLING_WINDOW"), 60)
 
@@ -124,6 +122,22 @@ INFLATION_T10YIE_MOVE_BPS_THRESHOLD = getenv_float(
 INFLATION_SELL_OFF_Z_THRESHOLD = getenv_float(
     os.getenv("INFLATION_SELL_OFF_Z_THRESHOLD"), 1.5
 )
+REAL_YIELD_PROXY_Z_STRESS_THRESHOLD = getenv_float(
+    os.getenv("REAL_YIELD_PROXY_Z_STRESS_THRESHOLD"), 1.5
+)
+REAL_YIELD_PROXY_Z_CRISIS_THRESHOLD = getenv_float(
+    os.getenv("REAL_YIELD_PROXY_Z_CRISIS_THRESHOLD"), 2.5
+)
+
+INFLATION_DGS10_MOVE_BPS_CRISIS_THRESHOLD = INFLATION_DGS10_MOVE_BPS_THRESHOLD + 10.0
+INFLATION_T10YIE_MOVE_BPS_CRISIS_THRESHOLD = INFLATION_T10YIE_MOVE_BPS_THRESHOLD + 5.0
+INFLATION_SELLOFF_STRESS_THRESHOLD = (
+    INFLATION_DGS10_MOVE_BPS_THRESHOLD + INFLATION_T10YIE_MOVE_BPS_THRESHOLD
+)
+INFLATION_SELLOFF_CRISIS_THRESHOLD = (
+    INFLATION_DGS10_MOVE_BPS_CRISIS_THRESHOLD
+    + INFLATION_T10YIE_MOVE_BPS_CRISIS_THRESHOLD
+)
 
 HY_OAS_CRISIS_THRESHOLD = HY_OAS_ABS_THRESHOLD + 1.5
 BBB_OAS_CRISIS_THRESHOLD = BBB_OAS_ABS_THRESHOLD + 0.75
@@ -133,8 +147,8 @@ SOFR_EFFR_SPREAD_BPS_CRISIS_THRESHOLD = max(
 )
 RRP_Z_CRISIS_THRESHOLD = RRP_Z_THRESHOLD + 0.5
 REPO_Z_CRISIS_THRESHOLD = REPO_Z_THRESHOLD + 0.5
-STRESS_SCORE_STRESS_THRESHOLD = 1.10
-STRESS_SCORE_CRISIS_THRESHOLD = 1.73
+STRESS_SCORE_STRESS_THRESHOLD = math.log(STRESS_INDEX_STRESS / (100.0 - STRESS_INDEX_STRESS))
+STRESS_SCORE_CRISIS_THRESHOLD = math.log(STRESS_INDEX_CRISIS / (100.0 - STRESS_INDEX_CRISIS))
 
 STRESS_LINE_COLOR = "#d97706"
 CRISIS_LINE_COLOR = "#b91c1c"
@@ -296,6 +310,7 @@ def analyze_credit_liquidity(
     t10yie: pd.Series,
     repo_total: Optional[pd.Series] = None,
     rolling_window: int = 60,
+    as_of: Optional[dt.date] = None,
 ) -> tuple[List[AlertEvent], Dict[str, pd.Series]]:
     signals: Dict[str, pd.Series] = {}
     alerts: List[AlertEvent] = []
@@ -363,48 +378,22 @@ def analyze_credit_liquidity(
     )
 
     # ----------------------------
-    # Composite stress score
+    # Composite stress indicator
     # ----------------------------
-    base_index = signals["hy_oas_z"].index
-
-    repo_z = (
-        signals["repo_total_z"]
-        if "repo_total_z" in signals
-        else zero_series_like(base_index)
+    indicator = compute_stress_indicator(
+        hy_oas, bbb_oas, sofr, effr, rrp_total, repo_total,
+        rolling_window=rolling_window,
+        hy_threshold=HY_OAS_ABS_THRESHOLD,
+        bbb_threshold=BBB_OAS_ABS_THRESHOLD,
+        funding_threshold_bps=SOFR_EFFR_SPREAD_BPS_THRESHOLD,
+        as_of=pd.Timestamp(as_of) if as_of is not None else None,
     )
-    repo_z = repo_z.reindex(base_index).fillna(0.0)
-
-    stress_components = pd.concat(
-        [
-            signals["hy_oas_z"].rename("hy_oas_z"),
-            signals["bbb_oas_z"].rename("bbb_oas_z"),
-            signals["hy_minus_bbb_z"].rename("hy_minus_bbb_z"),
-            signals["sofr_effr_spread_bps_z"].rename("sofr_effr_spread_bps_z"),
-            signals["rrp_total_z"].reindex(base_index).rename("rrp_total_z"),
-            repo_z.rename("repo_total_z"),
-        ],
-        axis=1,
-    ).fillna(0.0)
-
-    signals["stress_score"] = (
-        0.35 * stress_components["hy_oas_z"]
-        + 0.20 * stress_components["bbb_oas_z"]
-        + 0.20 * stress_components["hy_minus_bbb_z"]
-        + 0.15 * stress_components["sofr_effr_spread_bps_z"]
-        + 0.05 * stress_components["rrp_total_z"]
-        + 0.05 * stress_components["repo_total_z"]
-    )
-
-    signals["stress_prob"] = logistic_transform(signals["stress_score"])
-
-    stress_prob_latest = latest_valid(signals["stress_prob"]) or 0.0
-    regime = classify_stress_regime(stress_prob_latest)
-
-    signals["stress_regime"] = pd.Series(
-        [regime] * len(signals["stress_prob"]),
-        index=signals["stress_prob"].index,
-        dtype="object",
-    )
+    signals["stress_score"] = indicator["stress_score"]
+    signals["stress_index"] = indicator["stress_index"]
+    signals["stress_coverage"] = indicator["coverage"]
+    signals["stress_regime"] = indicator["stress_index"].map(classify_stress_regime)
+    stress_index_latest = float(indicator["stress_index"].iloc[-1]) if not indicator.empty else float("nan")
+    regime = classify_stress_regime(stress_index_latest)
 
     # ----------------------------
     # Credit alerts
@@ -560,8 +549,8 @@ def analyze_credit_liquidity(
     if inflation_selloff_triggered:
         severity = (
             "high"
-            if dgs10_change_latest >= INFLATION_DGS10_MOVE_BPS_THRESHOLD + 10.0
-            and t10yie_change_latest >= INFLATION_T10YIE_MOVE_BPS_THRESHOLD + 5.0
+            if dgs10_change_latest >= INFLATION_DGS10_MOVE_BPS_CRISIS_THRESHOLD
+            and t10yie_change_latest >= INFLATION_T10YIE_MOVE_BPS_CRISIS_THRESHOLD
             else "medium"
         )
         alerts.append(
@@ -602,13 +591,18 @@ def analyze_credit_liquidity(
     # ----------------------------
     # System / regime alert
     # ----------------------------
-    if regime != "NORMAL":
+    if regime == "UNKNOWN":
+        alerts.append(AlertEvent(
+            category="system", name="Stress indicator unavailable", severity="medium",
+            message="Required credit or funding data is stale or has insufficient history.",
+        ))
+    elif regime != "NORMAL":
         alerts.append(
             AlertEvent(
                 category="system",
                 name="Market Stress Regime",
                 severity="high" if regime == "CRISIS" else "medium",
-                message=f"System stress regime = {regime} (prob={stress_prob_latest:.2f}).",
+                message=f"System stress regime = {regime} (stress index={stress_index_latest:.1f}/100).",
             )
         )
 
@@ -773,15 +767,12 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
             threshold_lines=[
                 ThresholdLine(
                     "STRESS",
-                    INFLATION_DGS10_MOVE_BPS_THRESHOLD
-                    + INFLATION_T10YIE_MOVE_BPS_THRESHOLD,
+                    INFLATION_SELLOFF_STRESS_THRESHOLD,
                     STRESS_LINE_COLOR,
                 ),
                 ThresholdLine(
                     "CRISIS",
-                    INFLATION_DGS10_MOVE_BPS_THRESHOLD
-                    + INFLATION_T10YIE_MOVE_BPS_THRESHOLD
-                    + 15.0,
+                    INFLATION_SELLOFF_CRISIS_THRESHOLD,
                     CRISIS_LINE_COLOR,
                 ),
             ],
@@ -793,6 +784,20 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
             "Macro Context: 10Y Real Yield Proxy",
             "Percent",
             out_dir / "real_10y_proxy.png",
+            threshold_series=[
+                build_dynamic_threshold_series(
+                    signals["real_10y_proxy"],
+                    REAL_YIELD_PROXY_Z_STRESS_THRESHOLD,
+                    f"STRESS (rolling z={REAL_YIELD_PROXY_Z_STRESS_THRESHOLD:.2f})",
+                    STRESS_LINE_COLOR,
+                ),
+                build_dynamic_threshold_series(
+                    signals["real_10y_proxy"],
+                    REAL_YIELD_PROXY_Z_CRISIS_THRESHOLD,
+                    f"CRISIS (rolling z={REAL_YIELD_PROXY_Z_CRISIS_THRESHOLD:.2f})",
+                    CRISIS_LINE_COLOR,
+                ),
+            ],
         )
     )
     if "repo_total" in signals:
@@ -841,22 +846,22 @@ def build_charts(signals: Dict[str, pd.Series], out_dir: Path) -> List[Path]:
             )
         )
 
-    if "stress_prob" in signals:
+    if "stress_index" in signals:
         paths.append(
             make_line_chart(
-                last_n_days(signals["stress_prob"] * 100.0, CHART_LOOKBACK_DAYS),
-                "System Stress: Stress Probability",
-                "Percent",
-                out_dir / "stress_probability.png",
+                last_n_days(signals["stress_index"], CHART_LOOKBACK_DAYS),
+                "System Stress: Stress Index",
+                "Index (0–100)",
+                out_dir / "stress_index.png",
                 threshold_lines=[
                     ThresholdLine(
                         "STRESS",
-                        STRESS_PROB_STRESS * 100.0,
+                        STRESS_INDEX_STRESS,
                         STRESS_LINE_COLOR,
                     ),
                     ThresholdLine(
                         "CRISIS",
-                        STRESS_PROB_CRISIS * 100.0,
+                        STRESS_INDEX_CRISIS,
                         CRISIS_LINE_COLOR,
                     ),
                 ],
@@ -875,8 +880,13 @@ def format_latest_signal_text(
     name: str,
     fmt: str = "{:.2f}",
 ) -> str:
-    val = latest_valid(signals[name]) if name in signals else None
-    d = latest_date(signals[name]) if name in signals else None
+    if name.startswith("stress_") and name in signals:
+        series = signals[name]
+        val = float(series.iloc[-1]) if not series.empty and pd.notna(series.iloc[-1]) else None
+        d = series.index[-1] if not series.empty else None
+    else:
+        val = latest_valid(signals[name]) if name in signals else None
+        d = latest_date(signals[name]) if name in signals else None
     if val is None or d is None:
         return "n/a"
     return f"{fmt.format(val)} on {d.date()}"
@@ -921,20 +931,31 @@ def get_signal_explanations() -> Dict[str, str]:
         ),
         "dgs10": (
             "10Y Treasury yield is the nominal long-term government yield. "
-            "When it rises alongside breakeven inflation, the move is more consistent with inflation fear than with growth optimism."
+            f"For the inflation selloff screen, a rise over {INFLATION_LOOKBACK_DAYS} observations "
+            f"reaches STRESS at +{INFLATION_DGS10_MOVE_BPS_THRESHOLD:.1f} bps and "
+            f"CRISIS at +{INFLATION_DGS10_MOVE_BPS_CRISIS_THRESHOLD:.1f} bps. "
+            "These are change thresholds, not absolute yield levels; breakeven must also rise."
         ),
         "t10yie": (
-            "10Y breakeven inflation is the market's implied inflation expectation. "
-            "A rise means investors are demanding more compensation for expected inflation."
+            "10Y breakeven is market inflation compensation, which can also reflect risk premiums. "
+            f"For the inflation selloff screen, a rise over {INFLATION_LOOKBACK_DAYS} observations "
+            f"reaches STRESS at +{INFLATION_T10YIE_MOVE_BPS_THRESHOLD:.1f} bps and "
+            f"CRISIS at +{INFLATION_T10YIE_MOVE_BPS_CRISIS_THRESHOLD:.1f} bps. "
+            "The Treasury yield must also rise."
         ),
         "inflation_selloff_score": (
-            f"This combines the {INFLATION_LOOKBACK_DAYS}-day change in 10Y Treasury yields and "
-            "10Y breakeven inflation. Higher values mean nominal yields and inflation expectations are rising together, "
-            "which is the pattern expected in an inflation-driven bond selloff."
+            f"This adds the {INFLATION_LOOKBACK_DAYS}-observation changes in the 10Y Treasury yield "
+            "and 10Y breakeven, in bps. "
+            f"The chart marks STRESS at +{INFLATION_SELLOFF_STRESS_THRESHOLD:.1f} bps and "
+            f"CRISIS at +{INFLATION_SELLOFF_CRISIS_THRESHOLD:.1f} bps. "
+            "The alert also requires each component to cross its own threshold."
         ),
         "real_10y_proxy": (
             "Real 10Y yield proxy is nominal 10Y Treasury yield minus 10Y breakeven inflation. "
-            "If nominal yields rise but breakevens do not, the move is more likely coming from real yields than inflation fears."
+            "The chart's STRESS and CRISIS reference lines are the rolling mean plus "
+            f"{REAL_YIELD_PROXY_Z_STRESS_THRESHOLD:.2f} and "
+            f"{REAL_YIELD_PROXY_Z_CRISIS_THRESHOLD:.2f} standard deviations over "
+            f"{ROLLING_WINDOW} observations. They flag unusually high levels, not standalone alerts."
         ),
         "rrp_total": (
             "RRP total shows usage of the Fed's reverse repo facility. "
@@ -953,14 +974,18 @@ def get_signal_explanations() -> Dict[str, str]:
             "Higher values mean more overall market stress. "
             f"{format_threshold_pair(STRESS_SCORE_STRESS_THRESHOLD, STRESS_SCORE_CRISIS_THRESHOLD)}."
         ),
-        "stress_prob": (
-            "Stress probability converts the combined stress score into a 0 to 1 scale. "
-            "Higher values mean a greater chance that markets are in a stressed regime. "
-            f"{format_threshold_pair(STRESS_PROB_STRESS * 100.0, STRESS_PROB_CRISIS * 100.0, '%', 0)}."
+        "stress_index": (
+            "Stress index maps the composite score onto a 0–100 display scale; 50 corresponds to a score of zero. "
+            "It is not a calibrated probability. "
+            f"{format_threshold_pair(STRESS_INDEX_STRESS, STRESS_INDEX_CRISIS, decimals=0)}."
+        ),
+        "stress_coverage": (
+            "Share of the configured model weight supported by fresh data. "
+            "The composite is unavailable when required credit or funding inputs are stale."
         ),
         "stress_regime": (
-            "Stress regime is the overall label for current conditions: NORMAL, WATCH, STRESS, or CRISIS. "
-            f"STRESS begins at {STRESS_PROB_STRESS:.0%} probability and CRISIS begins at {STRESS_PROB_CRISIS:.0%} probability."
+            "Stress regime is the heuristic label for current conditions: NORMAL, WATCH, STRESS, CRISIS, or UNKNOWN when required data is unavailable. "
+            f"STRESS begins at index {STRESS_INDEX_STRESS:.0f} and CRISIS at {STRESS_INDEX_CRISIS:.0f}."
         ),
     }
 
@@ -989,12 +1014,17 @@ def get_chart_explanations() -> Dict[str, str]:
             f"The dashed lines mark {format_threshold_pair(SOFR_EFFR_SPREAD_BPS_THRESHOLD, SOFR_EFFR_SPREAD_BPS_CRISIS_THRESHOLD, 'bps', 1)}."
         ),
         "inflation_selloff": (
-            f"This chart adds the {INFLATION_LOOKBACK_DAYS}-day change in 10Y Treasury yields and "
-            "10Y breakeven inflation. Rising together suggests selling pressure in bonds is being driven by inflation expectations."
+            f"This chart adds the {INFLATION_LOOKBACK_DAYS}-observation changes in the 10Y Treasury yield "
+            "and 10Y breakeven. "
+            f"The dashed lines mark {format_threshold_pair(INFLATION_SELLOFF_STRESS_THRESHOLD, INFLATION_SELLOFF_CRISIS_THRESHOLD, 'bps', 1)}. "
+            "An alert also requires both individual changes to cross their thresholds."
         ),
         "real_10y_proxy": (
             "This chart shows nominal 10Y Treasury yields minus 10Y breakeven inflation. "
-            "It helps separate inflation-driven yield moves from real-rate moves."
+            "The dashed lines show the rolling mean plus "
+            f"{REAL_YIELD_PROXY_Z_STRESS_THRESHOLD:.2f} (STRESS) and "
+            f"{REAL_YIELD_PROXY_Z_CRISIS_THRESHOLD:.2f} (CRISIS) standard deviations "
+            f"over {ROLLING_WINDOW} observations. They are unusual-level references, not standalone alerts."
         ),
         "rrp_total": (
             "This chart shows the rolling z-score of reverse repo facility usage rather than the raw amount. "
@@ -1012,10 +1042,10 @@ def get_chart_explanations() -> Dict[str, str]:
             "This chart shows the model's overall stress level after combining multiple indicators. "
             "Higher values mean more market stress."
         ),
-        "stress_probability": (
-            "This chart shows the model's estimated probability that markets are in a stressed state. "
-            "Higher values mean more caution is warranted. "
-            f"The dashed lines mark {format_threshold_pair(STRESS_PROB_STRESS * 100.0, STRESS_PROB_CRISIS * 100.0, '%', 0)}."
+        "stress_index": (
+            "This chart maps the composite score to a 0–100 index, not an event probability. "
+            "Higher values indicate more stress. "
+            f"The dashed lines mark {format_threshold_pair(STRESS_INDEX_STRESS, STRESS_INDEX_CRISIS, decimals=0)}."
         ),
         "stress_score": (
             "This chart shows the combined stress score built from credit and liquidity signals. "
@@ -1063,10 +1093,11 @@ def build_snapshot_html(signals: Dict[str, pd.Series]) -> str:
             ("Stress score", "stress_score", "{:.2f}", explanations["stress_score"])
         )
 
-    if "stress_prob" in signals:
+    if "stress_index" in signals:
         rows.append(
-            ("Stress probability", "stress_prob", "{:.1%}", explanations["stress_prob"])
+            ("Stress index", "stress_index", "{:.1f}/100", explanations["stress_index"])
         )
+        rows.append(("Data coverage", "stress_coverage", "{:.0%}", explanations["stress_coverage"]))
 
     html_rows = []
     for label, key, fmt, explainer in rows:
@@ -1118,8 +1149,9 @@ def build_metric_guide_html(signals: Dict[str, pd.Series]) -> str:
     if "stress_score" in signals:
         metric_rows.append(("System", "Stress score", explanations["stress_score"]))
 
-    if "stress_prob" in signals:
-        metric_rows.append(("System", "Stress probability", explanations["stress_prob"]))
+    if "stress_index" in signals:
+        metric_rows.append(("System", "Stress index", explanations["stress_index"]))
+        metric_rows.append(("System", "Data coverage", explanations["stress_coverage"]))
 
     metric_rows.append(("System", "Stress regime", explanations["stress_regime"]))
 
@@ -1185,9 +1217,9 @@ def build_regime_html(signals: Dict[str, pd.Series]) -> str:
         if not latest_regime.empty:
             regime = str(latest_regime.iloc[-1])
 
-    prob_text = (
-        format_latest_signal_text(signals, "stress_prob", "{:.1%}")
-        if "stress_prob" in signals
+    index_text = (
+        format_latest_signal_text(signals, "stress_index", "{:.1f}/100")
+        if "stress_index" in signals
         else "n/a"
     )
 
@@ -1195,10 +1227,10 @@ def build_regime_html(signals: Dict[str, pd.Series]) -> str:
     <h3>Overall Regime</h3>
     <p>
       <b>Current regime:</b> {regime}<br>
-      <b>Stress probability:</b> {prob_text}
+      <b>Stress index:</b> {index_text}
     </p>
     <p>
-      This is the model's overall read on conditions.
+      This is a heuristic indicator, not a calibrated probability.
       NORMAL means markets look calm, WATCH means stress is starting to build,
       STRESS means conditions are deteriorating, and CRISIS means risk is elevated.
     </p>
@@ -1217,7 +1249,7 @@ def build_chart_section_html(chart_paths: List[Path]) -> str:
         "real_10y_proxy": "10Y Real Yield Proxy",
         "repo_total": "Repo Total",
         "stress_score": "Composite Stress Score",
-        "stress_probability": "Stress Probability",
+        "stress_index": "Stress Index",
     }
     blocks = []
 
@@ -1328,6 +1360,7 @@ def main() -> None:
         t10yie=t10yie,
         repo_total=repo_total,
         rolling_window=ROLLING_WINDOW,
+        as_of=end_date,
     )
 
     if SEND_ONLY_ON_ALERT and not alerts:
